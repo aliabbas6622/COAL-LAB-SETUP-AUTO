@@ -4,7 +4,9 @@
   <Extern href="vsshlids.h" />
   <Commands package="guidIrvine32SetupPackage">
     <Groups>
-      <Group guid="guidIrvine32SetupCmdSet" id="Irvine32Group" priority="0x0600" />
+      <Group guid="guidIrvine32SetupCmdSet" id="Irvine32Group" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
     </Groups>
     <Buttons>
       <Button guid="guidIrvine32SetupCmdSet" id="cmdidConfigureIrvine32" priority="0x0100" type="Button">

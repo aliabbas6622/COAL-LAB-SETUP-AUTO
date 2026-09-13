@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.Design;
 using System.IO;
 using System.Linq;
@@ -25,19 +26,71 @@ public sealed class Irvine32Package : AsyncPackage
     protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+
         var commandService = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
-        commandService?.AddCommand(new OleMenuCommand(ConfigureIrvine32, new CommandID(CommandSet, ConfigureCommandId)));
-        await ConfigureIrvine32Async();
+        if (commandService != null)
+        {
+            var menuCommandId = new CommandID(CommandSet, ConfigureCommandId);
+            var menuItem = new OleMenuCommand(ConfigureIrvine32, menuCommandId);
+            commandService.AddCommand(menuItem);
+        }
+
+        await CheckAndPromptOnSolutionOpenAsync();
     }
 
-    private async void ConfigureIrvine32(object sender, EventArgs e)
+    private void ConfigureIrvine32(object sender, EventArgs e)
     {
-        await ConfigureIrvine32Async();
+        _ = JoinableTaskFactory.RunAsync(async () =>
+        {
+            await ConfigureIrvine32Async(isManualInvocation: true);
+        });
     }
 
-    private async Task ConfigureIrvine32Async()
+    private async Task CheckAndPromptOnSolutionOpenAsync()
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync();
+
+        var dte = await GetServiceAsync(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+        if (dte == null) return;
+
+        var vcxprojPaths = GetVcxprojProjects(dte);
+        if (vcxprojPaths.Count == 0) return;
+
+        var unconfigured = vcxprojPaths.Where(p => !IsProjectConfigured(p)).ToList();
+        if (unconfigured.Count == 0) return;
+
+        var response = MessageBox.Show(
+            "One or more C++ projects in this solution are not yet configured for Irvine32.\n\nWould you like to configure Irvine32 now?",
+            "Irvine32 Setup",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (response == DialogResult.Yes)
+        {
+            await ConfigureIrvine32Async(isManualInvocation: false);
+        }
+    }
+
+    private async Task ConfigureIrvine32Async(bool isManualInvocation)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync();
+
+        var dte = await GetServiceAsync(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+        if (dte == null) return;
+
+        var vcxprojPaths = GetVcxprojProjects(dte);
+        if (vcxprojPaths.Count == 0)
+        {
+            if (isManualInvocation)
+            {
+                MessageBox.Show(
+                    "No C++ (.vcxproj) projects were found in the current solution.\nPlease open a solution containing a C++ project first.",
+                    "Irvine32 Setup",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            return;
+        }
 
         using var picker = new FolderBrowserDialog
         {
@@ -52,42 +105,143 @@ public sealed class Irvine32Package : AsyncPackage
         var libraryFile = Path.Combine(picker.SelectedPath, "Irvine32.lib");
         if (!File.Exists(includeFile) || !File.Exists(libraryFile))
         {
-            MessageBox.Show("The selected folder must contain both Irvine32.inc and Irvine32.lib.", "Irvine32 Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(
+                "The selected folder must contain both 'Irvine32.inc' and 'Irvine32.lib'.",
+                "Irvine32 Setup",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
             return;
         }
 
-        var dte = await GetServiceAsync(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
-        var projects = dte?.Solution.Projects.Cast<EnvDTE.Project>().Where(project => File.Exists(project.FullName)).ToList();
-        if (projects is null || projects.Count == 0)
+        try
         {
-            MessageBox.Show("Open a solution containing a C++ project first.", "Irvine32 Setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
+            dte.ExecuteCommand("File.SaveAll");
+        }
+        catch
+        {
+            // Ignore if the command is not available in the current IDE state
         }
 
         var updated = 0;
-        foreach (var project in projects)
+        foreach (var projectPath in vcxprojPaths)
         {
-            if (!project.FullName.EndsWith(".vcxproj", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            ConfigureProject(project.FullName, picker.SelectedPath);
-            updated++;
+            try
+            {
+                ConfigureProject(projectPath, picker.SelectedPath);
+                updated++;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Failed to configure '{Path.GetFileName(projectPath)}':\n{ex.Message}",
+                    "Irvine32 Setup Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
-        dte.ExecuteCommand("File.SaveAll");
-        MessageBox.Show($"Configured Irvine32 for {updated} project(s). Reload the solution or rebuild to apply the settings.", "Irvine32 Setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        MessageBox.Show(
+            $"Successfully configured Irvine32 for {updated} project(s).\n\n" +
+            "Important Notes:\n" +
+            "1. Irvine32 is a 32-bit library. Ensure your build platform is set to 'x86' (Win32).\n" +
+            "2. If Visual Studio prompts you to reload the project, select 'Reload'.",
+            "Irvine32 Setup",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+    }
+
+    private static List<string> GetVcxprojProjects(EnvDTE.DTE dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var list = new List<string>();
+        if (dte.Solution?.Projects == null) return list;
+
+        foreach (EnvDTE.Project project in dte.Solution.Projects)
+        {
+            CollectProjectPaths(project, list);
+        }
+        return list;
+    }
+
+    private static void CollectProjectPaths(EnvDTE.Project project, List<string> list)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (project == null) return;
+
+        try
+        {
+            var fullName = project.FullName;
+            if (!string.IsNullOrEmpty(fullName) &&
+                fullName.EndsWith(".vcxproj", StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(fullName))
+            {
+                list.Add(fullName);
+                return;
+            }
+
+            if (project.ProjectItems != null)
+            {
+                foreach (EnvDTE.ProjectItem item in project.ProjectItems)
+                {
+                    if (item.SubProject != null)
+                    {
+                        CollectProjectPaths(item.SubProject, list);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore items or project kinds that throw on FullName / ProjectItems access
+        }
+    }
+
+    private static bool IsProjectConfigured(string projectPath)
+    {
+        try
+        {
+            if (!File.Exists(projectPath)) return false;
+            var document = XDocument.Load(projectPath);
+            var root = document.Root;
+            if (root == null) return false;
+
+            var ns = root.Name.Namespace;
+            var definitionGroups = root.Elements(ns + "ItemDefinitionGroup");
+
+            foreach (var group in definitionGroups)
+            {
+                var masm = group.Element(ns + "MASM");
+                var include = (string?)masm?.Element(ns + "IncludePaths");
+                if (include != null && include.IndexOf("Irvine", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // Ignore read errors
+        }
+        return false;
     }
 
     private static void ConfigureProject(string projectPath, string irvinePath)
     {
         var document = XDocument.Load(projectPath, LoadOptions.PreserveWhitespace);
-        var ns = document.Root!.Name.Namespace;
-        var definitionGroups = document.Root.Elements(ns + "ItemDefinitionGroup").ToList();
+        var root = document.Root;
+        if (root == null) return;
+        var ns = root.Name.Namespace;
+
+        // 1. Ensure MASM Build Customization (.props and .targets) are imported
+        EnsureMasmBuildCustomizations(document, ns);
+
+        // 2. Configure ItemDefinitionGroup settings
+        var definitionGroups = root.Elements(ns + "ItemDefinitionGroup").ToList();
         if (definitionGroups.Count == 0)
         {
-            var import = document.Root.Elements(ns + "Import").LastOrDefault();
+            var import = root.Elements(ns + "Import").LastOrDefault();
             var group = new XElement(ns + "ItemDefinitionGroup");
-            if (import is null) document.Root.Add(group); else import.AddBeforeSelf(group);
+            if (import is null) root.Add(group); else import.AddBeforeSelf(group);
             definitionGroups.Add(group);
         }
 
@@ -97,15 +251,69 @@ public sealed class Irvine32Package : AsyncPackage
             SetValue(masm, ns + "IncludePaths", $"{irvinePath};%(IncludePaths)");
 
             var condition = (string?)group.Attribute("Condition") ?? string.Empty;
-            if (condition.IndexOf("Win32", StringComparison.OrdinalIgnoreCase) >= 0 || condition.Length == 0)
+            if (condition.IndexOf("Win32", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                condition.IndexOf("x86", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                condition.Length == 0)
             {
                 var link = GetOrCreate(group, ns + "Link");
                 SetValue(link, ns + "AdditionalLibraryDirectories", $"{irvinePath};%(AdditionalLibraryDirectories)");
                 SetValue(link, ns + "AdditionalDependencies", "Irvine32.lib;%(AdditionalDependencies)");
+
+                var subSystem = link.Element(ns + "SubSystem");
+                if (subSystem == null || string.IsNullOrWhiteSpace(subSystem.Value))
+                {
+                    link.Add(new XElement(ns + "SubSystem", "Console"));
+                }
             }
         }
 
         document.Save(projectPath);
+    }
+
+    private static void EnsureMasmBuildCustomizations(XDocument document, XNamespace ns)
+    {
+        var root = document.Root;
+        if (root == null) return;
+
+        const string masmProps = @"$(VCTargetsPath)\BuildCustomizations\masm.props";
+        const string masmTargets = @"$(VCTargetsPath)\BuildCustomizations\masm.targets";
+
+        // ExtensionSettings
+        var settingsGroup = root.Elements(ns + "ImportGroup")
+            .FirstOrDefault(g => (string?)g.Attribute("Label") == "ExtensionSettings");
+        if (settingsGroup == null)
+        {
+            settingsGroup = new XElement(ns + "ImportGroup", new XAttribute("Label", "ExtensionSettings"));
+            var cppProps = root.Elements(ns + "Import")
+                .FirstOrDefault(i => ((string?)i.Attribute("Project"))?.Contains("Microsoft.Cpp.props") == true);
+            if (cppProps != null)
+                cppProps.AddAfterSelf(settingsGroup);
+            else
+                root.Add(settingsGroup);
+        }
+
+        bool hasMasmProps = settingsGroup.Elements(ns + "Import")
+            .Any(i => string.Equals((string?)i.Attribute("Project"), masmProps, StringComparison.OrdinalIgnoreCase));
+        if (!hasMasmProps)
+        {
+            settingsGroup.Add(new XElement(ns + "Import", new XAttribute("Project", masmProps)));
+        }
+
+        // ExtensionTargets
+        var targetsGroup = root.Elements(ns + "ImportGroup")
+            .FirstOrDefault(g => (string?)g.Attribute("Label") == "ExtensionTargets");
+        if (targetsGroup == null)
+        {
+            targetsGroup = new XElement(ns + "ImportGroup", new XAttribute("Label", "ExtensionTargets"));
+            root.Add(targetsGroup);
+        }
+
+        bool hasMasmTargets = targetsGroup.Elements(ns + "Import")
+            .Any(i => string.Equals((string?)i.Attribute("Project"), masmTargets, StringComparison.OrdinalIgnoreCase));
+        if (!hasMasmTargets)
+        {
+            targetsGroup.Add(new XElement(ns + "Import", new XAttribute("Project", masmTargets)));
+        }
     }
 
     private static XElement GetOrCreate(XElement parent, XName name)
