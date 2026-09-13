@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata>
+    <Identity Id="Irvine32Setup.1a9b7c3d-5c18-4ce7-8f0b-2f3f0bdb6b42" Version="1.1" Language="en-US" Publisher="COAL Tools" />
+    <DisplayName>Irvine32 Setup</DisplayName>
+    <Description>Configures Irvine32 include and library paths for MASM projects.</Description>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,19.0)"><ProductArchitecture>amd64</ProductArchitecture></InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[17.0,19.0)"><ProductArchitecture>amd64</ProductArchitecture></InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[17.0,19.0)"><ProductArchitecture>amd64</ProductArchitecture></InstallationTarget>
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.VisualStudio.MPF" DisplayName="Visual Studio MPF" Version="[17.0,19.0)" />
+  </Dependencies>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,19.0)" DisplayName="Visual Studio core editor" />
+  </Prerequisites>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="Irvine32Setup" Path="|Irvine32Setup;PkgDefProjectOutputGroup|" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011" />
+  </Assets>
+</PackageManifest>

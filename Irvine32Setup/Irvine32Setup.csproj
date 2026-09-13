@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <BaseIntermediateOutputPath>obj\</BaseIntermediateOutputPath>
+    <IntermediateOutputPath>obj\$(Configuration)\</IntermediateOutputPath>
+    <RootNamespace>Irvine32Setup</RootNamespace>
+    <AssemblyName>Irvine32Setup</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <CreatePkgDefAssemblyToProcess>$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\Irvine32Setup.dll</CreatePkgDefAssemblyToProcess>
+    <GenerateVsixContainer>true</GenerateVsixContainer>
+    <TargetVsixContainer>$(MSBuildProjectDirectory)\bin\$(Configuration)\Irvine32Setup.vsix</TargetVsixContainer>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>true</IncludeDebugSymbolsInVSIXContainer>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.VisualStudio.Shell.15.0" Version="17.14.40264" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.14.2094" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <VSIXSource Include="source.extension.vsixmanifest" />
+    <VSCTCompile Include="Irvine32Setup.vsct" />
+  </ItemGroup>
+
+  <Import Project="$(NuGetPackageRoot)microsoft.vssdk.buildtools\17.14.2094\tools\vssdk\Microsoft.VsSDK.targets" />
+</Project>

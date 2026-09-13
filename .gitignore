@@ -1,0 +1,16 @@
+# Visual Studio user and build output
+.vs/
+[Bb]in/
+[Oo]bj/
+Debug/
+Release/
+x64/
+
+# Visual Studio extension build output
+Irvine32Setup/.vsix
+Irvine32Setup/bin/
+Irvine32Setup/obj/
+
+# User-specific files
+*.user
+*.suo

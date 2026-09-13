@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+  <Commands package="guidIrvine32SetupPackage">
+    <Groups>
+      <Group guid="guidIrvine32SetupCmdSet" id="Irvine32Group" priority="0x0600" />
+    </Groups>
+    <Buttons>
+      <Button guid="guidIrvine32SetupCmdSet" id="cmdidConfigureIrvine32" priority="0x0100" type="Button">
+        <Parent guid="guidIrvine32SetupCmdSet" id="Irvine32Group" />
+        <Strings>
+          <ButtonText>Configure Irvine32</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+  <Symbols>
+    <GuidSymbol name="guidIrvine32SetupPackage" value="{a4d36b69-0e2d-4a88-9b76-8ccf7d45c7b1}" />
+    <GuidSymbol name="guidIrvine32SetupCmdSet" value="{8f5f49c2-3b7c-4d6e-9d5e-4db7b07e5f38}">
+      <IDSymbol name="Irvine32Group" value="0x1020" />
+      <IDSymbol name="cmdidConfigureIrvine32" value="0x0100" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
