@@ -2,18 +2,21 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.Design;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Xml.Linq;
+using EnvDTE80;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 
 namespace Irvine32Setup;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("Irvine32 Setup", "Configures Irvine32 for MASM projects.", "1.0")]
+[InstalledProductRegistration("Irvine32 Setup", "Configures Irvine32 library for MASM projects.", "1.3")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [System.Runtime.InteropServices.Guid(PackageGuidString)]
@@ -21,6 +24,7 @@ public sealed class Irvine32Package : AsyncPackage
 {
     public const string PackageGuidString = "a4d36b69-0e2d-4a88-9b76-8ccf7d45c7b1";
     private const int ConfigureCommandId = 0x0100;
+    private const int AddAsmFileCommandId = 0x0200;
     private static readonly Guid CommandSet = new("8f5f49c2-3b7c-4d6e-9d5e-4db7b07e5f38");
 
     protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
@@ -30,9 +34,11 @@ public sealed class Irvine32Package : AsyncPackage
         var commandService = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
         if (commandService != null)
         {
-            var menuCommandId = new CommandID(CommandSet, ConfigureCommandId);
-            var menuItem = new OleMenuCommand(ConfigureIrvine32, menuCommandId);
-            commandService.AddCommand(menuItem);
+            var configureCmdId = new CommandID(CommandSet, ConfigureCommandId);
+            commandService.AddCommand(new OleMenuCommand(ConfigureIrvine32, configureCmdId));
+
+            var addAsmCmdId = new CommandID(CommandSet, AddAsmFileCommandId);
+            commandService.AddCommand(new OleMenuCommand(AddIrvineAsmFile, addAsmCmdId));
         }
 
         await CheckAndPromptOnSolutionOpenAsync();
@@ -43,6 +49,14 @@ public sealed class Irvine32Package : AsyncPackage
         _ = JoinableTaskFactory.RunAsync(async () =>
         {
             await ConfigureIrvine32Async(isManualInvocation: true);
+        });
+    }
+
+    private void AddIrvineAsmFile(object sender, EventArgs e)
+    {
+        _ = JoinableTaskFactory.RunAsync(async () =>
+        {
+            await AddIrvineAsmFileAsync();
         });
     }
 
@@ -60,7 +74,8 @@ public sealed class Irvine32Package : AsyncPackage
         if (unconfigured.Count == 0) return;
 
         var response = MessageBox.Show(
-            "One or more C++ projects in this solution are not yet configured for Irvine32.\n\nWould you like to configure Irvine32 now?",
+            "One or more C++ projects in this solution are not yet configured for Irvine32.\n\n" +
+            "Would you like to configure Irvine32 now?",
             "Irvine32 Setup",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
@@ -92,24 +107,72 @@ public sealed class Irvine32Package : AsyncPackage
             return;
         }
 
-        using var picker = new FolderBrowserDialog
+        string? solutionDir = null;
+        try
         {
-            Description = "Select the folder that contains Irvine32.inc and Irvine32.lib.",
-            ShowNewFolderButton = false
-        };
+            if (dte.Solution != null && !string.IsNullOrEmpty(dte.Solution.FullName))
+            {
+                solutionDir = Path.GetDirectoryName(dte.Solution.FullName);
+            }
+        }
+        catch { }
 
-        if (picker.ShowDialog() != DialogResult.OK)
-            return;
+        string? chosenPath = null;
+        var detectedPath = DetectIrvine32Path(solutionDir);
 
-        var includeFile = Path.Combine(picker.SelectedPath, "Irvine32.inc");
-        var libraryFile = Path.Combine(picker.SelectedPath, "Irvine32.lib");
-        if (!File.Exists(includeFile) || !File.Exists(libraryFile))
+        if (!string.IsNullOrEmpty(detectedPath))
         {
-            MessageBox.Show(
-                "The selected folder must contain both 'Irvine32.inc' and 'Irvine32.lib'.",
-                "Irvine32 Setup",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            var useDetected = MessageBox.Show(
+                $"Found Irvine32 library at:\n'{detectedPath}'\n\nWould you like to use this location?\n\n(Select 'No' to browse for another folder)",
+                "Irvine32 Setup - Path Detected",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (useDetected == DialogResult.Cancel)
+                return;
+
+            if (useDetected == DialogResult.Yes)
+            {
+                chosenPath = detectedPath;
+            }
+        }
+
+        if (string.IsNullOrEmpty(chosenPath))
+        {
+            using var picker = new FolderBrowserDialog
+            {
+                Description = "Select the folder containing Irvine32.inc and Irvine32.lib.",
+                ShowNewFolderButton = false
+            };
+
+            if (!string.IsNullOrEmpty(detectedPath) && Directory.Exists(detectedPath))
+            {
+                picker.SelectedPath = detectedPath;
+            }
+
+            if (picker.ShowDialog() == DialogResult.OK)
+            {
+                chosenPath = picker.SelectedPath;
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(detectedPath))
+                {
+                    chosenPath = await TryDownloadAndInstallIrvineAsync();
+                }
+            }
+        }
+
+        if (string.IsNullOrEmpty(chosenPath) || !IsValidIrvineDirectory(chosenPath))
+        {
+            if (isManualInvocation && !string.IsNullOrEmpty(chosenPath))
+            {
+                MessageBox.Show(
+                    "The selected folder must contain both 'Irvine32.inc' and 'Irvine32.lib'.",
+                    "Irvine32 Setup",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
             return;
         }
 
@@ -117,17 +180,14 @@ public sealed class Irvine32Package : AsyncPackage
         {
             dte.ExecuteCommand("File.SaveAll");
         }
-        catch
-        {
-            // Ignore if the command is not available in the current IDE state
-        }
+        catch { }
 
         var updated = 0;
         foreach (var projectPath in vcxprojPaths)
         {
             try
             {
-                ConfigureProject(projectPath, picker.SelectedPath);
+                ConfigureProject(projectPath, chosenPath!);
                 updated++;
             }
             catch (Exception ex)
@@ -140,14 +200,383 @@ public sealed class Irvine32Package : AsyncPackage
             }
         }
 
+        TryEnsureWin32Platform(dte);
+
         MessageBox.Show(
-            $"Successfully configured Irvine32 for {updated} project(s).\n\n" +
-            "Important Notes:\n" +
-            "1. Irvine32 is a 32-bit library. Ensure your build platform is set to 'x86' (Win32).\n" +
-            "2. If Visual Studio prompts you to reload the project, select 'Reload'.",
+            $"Successfully configured Irvine32 for {updated} project(s)!\n\n" +
+            $"Irvine32 Path: {chosenPath}\n\n" +
+            "Reminders:\n" +
+            "1. Irvine32 is a 32-bit library. Build with the 'x86' (Win32) configuration.\n" +
+            "2. If Visual Studio asks to reload the project, choose 'Reload'.",
             "Irvine32 Setup",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
+    }
+
+    private async Task AddIrvineAsmFileAsync()
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync();
+
+        var dte = await GetServiceAsync(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+        if (dte == null) return;
+
+        var targetProjectPath = GetSelectedOrPrimaryVcxproj(dte);
+        if (string.IsNullOrEmpty(targetProjectPath) || !File.Exists(targetProjectPath))
+        {
+            MessageBox.Show(
+                "Please select or open a C++ (.vcxproj) project in Solution Explorer first.",
+                "Irvine32 Setup",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        string projectPath = targetProjectPath!;
+        var inputName = ShowFileNameDialog("main.asm");
+        if (string.IsNullOrWhiteSpace(inputName))
+            return;
+
+        string fileName = inputName!;
+        if (!fileName.EndsWith(".asm", StringComparison.OrdinalIgnoreCase))
+        {
+            fileName += ".asm";
+        }
+
+        var projectDir = Path.GetDirectoryName(projectPath);
+        if (string.IsNullOrEmpty(projectDir))
+            return;
+
+        var filePath = Path.Combine(projectDir, fileName);
+
+        if (File.Exists(filePath))
+        {
+            var overwrite = MessageBox.Show(
+                $"File '{fileName}' already exists in the project directory.\n\nDo you want to overwrite it?",
+                "File Exists",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (overwrite != DialogResult.Yes)
+                return;
+        }
+
+        const string asmTemplate =
+@"; =========================================================================
+; Title: Irvine32 MASM Starter Template
+; Description: Demonstration program using the Irvine32 library.
+; =========================================================================
+INCLUDE Irvine32.inc
+
+.data
+    welcomeMsg BYTE ""========================================"", 0dh, 0ah
+               BYTE "" Hello, World from Irvine32 MASM!       "", 0dh, 0ah
+               BYTE ""========================================"", 0dh, 0ah, 0
+    val1       DWORD 15
+    val2       DWORD 25
+    sumResult  DWORD ?
+
+.code
+main PROC
+    ; Display greeting message
+    mov edx, OFFSET welcomeMsg
+    call WriteString
+    call Crlf
+
+    ; Perform demonstration arithmetic
+    mov eax, val1
+    add eax, val2
+    mov sumResult, eax
+
+    ; Display register states
+    call DumpRegs
+
+    exit
+main ENDP
+END main
+";
+
+        try
+        {
+            File.WriteAllText(filePath, asmTemplate);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to create '{fileName}':\n{ex.Message}", "File Creation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        AddAsmToProjectFile(projectPath, fileName);
+
+        if (!IsProjectConfigured(projectPath))
+        {
+            var askConfig = MessageBox.Show(
+                $"Project '{Path.GetFileName(projectPath)}' is not yet configured for Irvine32.\n\nWould you like to configure Irvine32 now?",
+                "Configure Irvine32",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (askConfig == DialogResult.Yes)
+            {
+                await ConfigureIrvine32Async(isManualInvocation: false);
+            }
+        }
+
+        TryEnsureWin32Platform(dte);
+
+        try
+        {
+            dte.ItemOperations.OpenFile(filePath);
+        }
+        catch { }
+    }
+
+    private static string? ShowFileNameDialog(string defaultName)
+    {
+        using var form = new Form
+        {
+            Width = 420,
+            Height = 160,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            Text = "Add Irvine32 Assembly File",
+            StartPosition = FormStartPosition.CenterScreen,
+            MaximizeBox = false,
+            MinimizeBox = false
+        };
+
+        var label = new Label { Left = 20, Top = 15, Width = 360, Text = "Assembly file name (with .asm extension):" };
+        var textBox = new TextBox { Left = 20, Top = 40, Width = 360, Text = defaultName };
+        var btnOk = new Button { Text = "Add", Left = 200, Width = 85, Top = 75, DialogResult = DialogResult.OK };
+        var btnCancel = new Button { Text = "Cancel", Left = 295, Width = 85, Top = 75, DialogResult = DialogResult.Cancel };
+
+        form.Controls.AddRange(new Control[] { label, textBox, btnOk, btnCancel });
+        form.AcceptButton = btnOk;
+        form.CancelButton = btnCancel;
+
+        return form.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
+    }
+
+    private static void AddAsmToProjectFile(string projectPath, string fileName)
+    {
+        var document = XDocument.Load(projectPath, LoadOptions.PreserveWhitespace);
+        var root = document.Root;
+        if (root == null) return;
+        var ns = root.Name.Namespace;
+
+        EnsureMasmBuildCustomizations(document, ns);
+
+        bool alreadyIncluded = root.Elements(ns + "ItemGroup")
+            .Elements(ns + "MASM")
+            .Any(m => string.Equals((string?)m.Attribute("Include"), fileName, StringComparison.OrdinalIgnoreCase));
+
+        if (!alreadyIncluded)
+        {
+            var masmGroup = root.Elements(ns + "ItemGroup")
+                .FirstOrDefault(g => g.Elements(ns + "MASM").Any());
+
+            if (masmGroup == null)
+            {
+                masmGroup = new XElement(ns + "ItemGroup");
+                var targets = root.Elements(ns + "Import").LastOrDefault();
+                if (targets != null) targets.AddBeforeSelf(masmGroup);
+                else root.Add(masmGroup);
+            }
+
+            var masmItem = new XElement(ns + "MASM",
+                new XAttribute("Include", fileName),
+                new XElement(ns + "FileType", "Document"));
+
+            masmGroup.Add(masmItem);
+            document.Save(projectPath);
+        }
+    }
+
+    private static string? GetSelectedOrPrimaryVcxproj(EnvDTE.DTE dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            if (dte.SelectedItems != null && dte.SelectedItems.Count > 0)
+            {
+                foreach (EnvDTE.SelectedItem item in dte.SelectedItems)
+                {
+                    if (item.Project != null)
+                    {
+                        var fn = item.Project.FullName;
+                        if (!string.IsNullOrEmpty(fn) && fn.EndsWith(".vcxproj", StringComparison.OrdinalIgnoreCase) && File.Exists(fn))
+                        {
+                            return fn;
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+
+        var all = GetVcxprojProjects(dte);
+        return all.FirstOrDefault();
+    }
+
+    private static void TryEnsureWin32Platform(EnvDTE.DTE dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            var solutionBuild = dte.Solution?.SolutionBuild;
+            if (solutionBuild == null) return;
+
+            var activeConfig = solutionBuild.ActiveConfiguration as SolutionConfiguration2;
+            if (activeConfig == null) return;
+
+            var currentPlatform = activeConfig.PlatformName;
+            if (!string.Equals(currentPlatform, "x86", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(currentPlatform, "Win32", StringComparison.OrdinalIgnoreCase))
+            {
+                EnvDTE.SolutionConfiguration? targetConfig = null;
+                foreach (EnvDTE.SolutionConfiguration cfg in solutionBuild.SolutionConfigurations)
+                {
+                    if (cfg is SolutionConfiguration2 cfg2)
+                    {
+                        if ((string.Equals(cfg2.PlatformName, "x86", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(cfg2.PlatformName, "Win32", StringComparison.OrdinalIgnoreCase)) &&
+                            string.Equals(cfg2.Name, activeConfig.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            targetConfig = cfg;
+                            break;
+                        }
+                    }
+                }
+
+                if (targetConfig != null)
+                {
+                    var ask = MessageBox.Show(
+                        $"The active solution platform is currently set to '{currentPlatform}'.\n\n" +
+                        "Irvine32 is a 32-bit library requiring x86 (Win32).\n" +
+                        "Would you like to switch the active solution platform to x86 now?",
+                        "Switch Platform to x86",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+
+                    if (ask == DialogResult.Yes)
+                    {
+                        targetConfig.Activate();
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+
+    private static string? DetectIrvine32Path(string? solutionDir)
+    {
+        var candidates = new List<string>();
+
+        if (!string.IsNullOrEmpty(solutionDir))
+        {
+            candidates.Add(Path.Combine(solutionDir, "Irvine"));
+            candidates.Add(Path.Combine(solutionDir, "Irvine32"));
+            candidates.Add(Path.Combine(solutionDir, "Irvine32-master"));
+        }
+
+        var env = Environment.GetEnvironmentVariable("IRVINE") ?? Environment.GetEnvironmentVariable("IRVINE32");
+        if (!string.IsNullOrEmpty(env))
+        {
+            candidates.Add(env);
+        }
+
+        candidates.Add(@"C:\Irvine");
+        candidates.Add(@"C:\Irvine32");
+        candidates.Add(@"C:\Irvine32-master");
+        candidates.Add(@"D:\Irvine");
+        candidates.Add(@"D:\Irvine32");
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrEmpty(userProfile))
+        {
+            candidates.Add(Path.Combine(userProfile, "Downloads", "Irvine"));
+            candidates.Add(Path.Combine(userProfile, "Downloads", "Irvine32"));
+            candidates.Add(Path.Combine(userProfile, "Downloads", "Irvine32-master"));
+            candidates.Add(Path.Combine(userProfile, "Desktop", "Irvine"));
+            candidates.Add(Path.Combine(userProfile, "Desktop", "Irvine32"));
+        }
+
+        foreach (var dir in candidates)
+        {
+            if (IsValidIrvineDirectory(dir))
+            {
+                return Path.GetFullPath(dir);
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsValidIrvineDirectory(string? path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return Directory.Exists(path) &&
+                   File.Exists(Path.Combine(path, "Irvine32.inc")) &&
+                   File.Exists(Path.Combine(path, "Irvine32.lib"));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<string?> TryDownloadAndInstallIrvineAsync()
+    {
+        var ask = MessageBox.Show(
+            "Irvine32 library was not found in common locations.\n\n" +
+            "Would you like to automatically download and install Irvine32 to 'C:\\Irvine'?",
+            "Download Irvine32",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (ask != DialogResult.Yes)
+            return null;
+
+        var targetDir = @"C:\Irvine";
+        var tempZip = Path.Combine(Path.GetTempPath(), "Irvine32_Download.zip");
+
+        try
+        {
+            Directory.CreateDirectory(targetDir);
+
+            using (var client = new WebClient())
+            {
+                try
+                {
+                    await client.DownloadFileTaskAsync(new Uri("https://github.com/kipirvine/Irvine32/archive/refs/heads/master.zip"), tempZip);
+                }
+                catch
+                {
+                    await client.DownloadFileTaskAsync(new Uri("http://kipirvine.com/asm/examples/Irvine.zip"), tempZip);
+                }
+            }
+
+            if (File.Exists(tempZip))
+            {
+                ZipFile.ExtractToDirectory(tempZip, targetDir);
+                try { File.Delete(tempZip); } catch { }
+
+                if (IsValidIrvineDirectory(targetDir))
+                    return targetDir;
+
+                foreach (var sub in Directory.GetDirectories(targetDir))
+                {
+                    if (IsValidIrvineDirectory(sub))
+                        return sub;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Auto-download could not be completed:\n{ex.Message}\n\nPlease install Irvine32 manually.", "Download Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        return null;
     }
 
     private static List<string> GetVcxprojProjects(EnvDTE.DTE dte)
@@ -190,10 +619,7 @@ public sealed class Irvine32Package : AsyncPackage
                 }
             }
         }
-        catch
-        {
-            // Ignore items or project kinds that throw on FullName / ProjectItems access
-        }
+        catch { }
     }
 
     private static bool IsProjectConfigured(string projectPath)
@@ -218,10 +644,7 @@ public sealed class Irvine32Package : AsyncPackage
                 }
             }
         }
-        catch
-        {
-            // Ignore read errors
-        }
+        catch { }
         return false;
     }
 
@@ -232,10 +655,8 @@ public sealed class Irvine32Package : AsyncPackage
         if (root == null) return;
         var ns = root.Name.Namespace;
 
-        // 1. Ensure MASM Build Customization (.props and .targets) are imported
         EnsureMasmBuildCustomizations(document, ns);
 
-        // 2. Configure ItemDefinitionGroup settings
         var definitionGroups = root.Elements(ns + "ItemDefinitionGroup").ToList();
         if (definitionGroups.Count == 0)
         {
@@ -278,7 +699,6 @@ public sealed class Irvine32Package : AsyncPackage
         const string masmProps = @"$(VCTargetsPath)\BuildCustomizations\masm.props";
         const string masmTargets = @"$(VCTargetsPath)\BuildCustomizations\masm.targets";
 
-        // ExtensionSettings
         var settingsGroup = root.Elements(ns + "ImportGroup")
             .FirstOrDefault(g => (string?)g.Attribute("Label") == "ExtensionSettings");
         if (settingsGroup == null)
@@ -299,7 +719,6 @@ public sealed class Irvine32Package : AsyncPackage
             settingsGroup.Add(new XElement(ns + "Import", new XAttribute("Project", masmProps)));
         }
 
-        // ExtensionTargets
         var targetsGroup = root.Elements(ns + "ImportGroup")
             .FirstOrDefault(g => (string?)g.Attribute("Label") == "ExtensionTargets");
         if (targetsGroup == null)
