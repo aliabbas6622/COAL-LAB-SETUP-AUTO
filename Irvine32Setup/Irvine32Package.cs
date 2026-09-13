@@ -10,19 +10,28 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Xml.Linq;
 using EnvDTE80;
+using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 
 namespace Irvine32Setup;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("Irvine32 Setup", "Configures Irvine32 library for MASM projects.", "1.3")]
+[InstalledProductRegistration("Irvine32 Setup", "Configures Irvine32 library for MASM projects.", "1.4")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
-[ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
+[ProvideUIContextRule(UiContextGuidString,
+    name: "AutoLoadOnSolution",
+    expression: "SolutionExists",
+    termNames: new[] { "SolutionExists" },
+    termValues: new[] { VSConstants.UICONTEXT.SolutionExists_string })]
+[ProvideAutoLoad(UiContextGuidString, PackageAutoLoadFlags.BackgroundLoad)]
+[ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string, PackageAutoLoadFlags.BackgroundLoad)]
+[ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExistsAndFullyLoaded_string, PackageAutoLoadFlags.BackgroundLoad)]
 [System.Runtime.InteropServices.Guid(PackageGuidString)]
 public sealed class Irvine32Package : AsyncPackage
 {
     public const string PackageGuidString = "a4d36b69-0e2d-4a88-9b76-8ccf7d45c7b1";
+    public const string UiContextGuidString = "486b2f3d-4a44-48c6-b0b1-5de84687c172";
     private const int ConfigureCommandId = 0x0100;
     private const int AddAsmFileCommandId = 0x0200;
     private static readonly Guid CommandSet = new("8f5f49c2-3b7c-4d6e-9d5e-4db7b07e5f38");
@@ -41,7 +50,23 @@ public sealed class Irvine32Package : AsyncPackage
             commandService.AddCommand(new OleMenuCommand(AddIrvineAsmFile, addAsmCmdId));
         }
 
-        await CheckAndPromptOnSolutionOpenAsync();
+        // Listen for solution fully loaded event
+        KnownUIContexts.SolutionExistsAndFullyLoadedContext.UIContextChanged += (s, e) =>
+        {
+            _ = JoinableTaskFactory.RunAsync(async () =>
+            {
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (KnownUIContexts.SolutionExistsAndFullyLoadedContext.IsActive)
+                {
+                    await CheckAndPromptOnSolutionOpenAsync();
+                }
+            });
+        };
+
+        if (KnownUIContexts.SolutionExistsAndFullyLoadedContext.IsActive)
+        {
+            await CheckAndPromptOnSolutionOpenAsync();
+        }
     }
 
     private void ConfigureIrvine32(object sender, EventArgs e)
@@ -74,8 +99,8 @@ public sealed class Irvine32Package : AsyncPackage
         if (unconfigured.Count == 0) return;
 
         var response = MessageBox.Show(
-            "One or more C++ projects in this solution are not yet configured for Irvine32.\n\n" +
-            "Would you like to configure Irvine32 now?",
+            "One or more C++ projects in this solution require Irvine32 / MASM setup.\n\n" +
+            "Would you like to configure Irvine32 and MASM now?",
             "Irvine32 Setup",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
@@ -205,7 +230,7 @@ public sealed class Irvine32Package : AsyncPackage
         MessageBox.Show(
             $"Successfully configured Irvine32 for {updated} project(s)!\n\n" +
             $"Irvine32 Path: {chosenPath}\n\n" +
-            "Reminders:\n" +
+            "Important Reminders:\n" +
             "1. Irvine32 is a 32-bit library. Build with the 'x86' (Win32) configuration.\n" +
             "2. If Visual Studio asks to reload the project, choose 'Reload'.",
             "Irvine32 Setup",
@@ -363,6 +388,7 @@ END main
         var ns = root.Name.Namespace;
 
         EnsureMasmBuildCustomizations(document, ns);
+        ConvertAsmFilesToMasm(document, ns);
 
         bool alreadyIncluded = root.Elements(ns + "ItemGroup")
             .Elements(ns + "MASM")
@@ -632,8 +658,15 @@ END main
             if (root == null) return false;
 
             var ns = root.Name.Namespace;
-            var definitionGroups = root.Elements(ns + "ItemDefinitionGroup");
 
+            // If any .asm file is trapped in None or ClCompile, it needs configuration
+            bool hasUnconfiguredAsm = root.Elements(ns + "ItemGroup")
+                .Elements()
+                .Any(e => (e.Name == ns + "None" || e.Name == ns + "ClCompile") &&
+                          ((string?)e.Attribute("Include"))?.EndsWith(".asm", StringComparison.OrdinalIgnoreCase) == true);
+            if (hasUnconfiguredAsm) return false;
+
+            var definitionGroups = root.Elements(ns + "ItemDefinitionGroup");
             foreach (var group in definitionGroups)
             {
                 var masm = group.Element(ns + "MASM");
@@ -656,6 +689,7 @@ END main
         var ns = root.Name.Namespace;
 
         EnsureMasmBuildCustomizations(document, ns);
+        ConvertAsmFilesToMasm(document, ns);
 
         var definitionGroups = root.Elements(ns + "ItemDefinitionGroup").ToList();
         if (definitionGroups.Count == 0)
@@ -689,6 +723,49 @@ END main
         }
 
         document.Save(projectPath);
+    }
+
+    private static void ConvertAsmFilesToMasm(XDocument document, XNamespace ns)
+    {
+        var root = document.Root;
+        if (root == null) return;
+
+        var itemsToConvert = root.Elements(ns + "ItemGroup")
+            .Elements()
+            .Where(e => (e.Name == ns + "None" || e.Name == ns + "ClCompile" || e.Name == ns + "ClInclude") &&
+                        ((string?)e.Attribute("Include"))?.EndsWith(".asm", StringComparison.OrdinalIgnoreCase) == true)
+            .ToList();
+
+        if (itemsToConvert.Count == 0) return;
+
+        var masmGroup = root.Elements(ns + "ItemGroup")
+            .FirstOrDefault(g => g.Elements(ns + "MASM").Any());
+
+        if (masmGroup == null)
+        {
+            masmGroup = new XElement(ns + "ItemGroup");
+            var targets = root.Elements(ns + "Import").LastOrDefault();
+            if (targets != null) targets.AddBeforeSelf(masmGroup);
+            else root.Add(masmGroup);
+        }
+
+        foreach (var item in itemsToConvert)
+        {
+            var include = (string?)item.Attribute("Include");
+            item.Remove();
+
+            if (!string.IsNullOrEmpty(include))
+            {
+                bool alreadyInMasm = masmGroup.Elements(ns + "MASM")
+                    .Any(m => string.Equals((string?)m.Attribute("Include"), include, StringComparison.OrdinalIgnoreCase));
+                if (!alreadyInMasm)
+                {
+                    masmGroup.Add(new XElement(ns + "MASM",
+                        new XAttribute("Include", include),
+                        new XElement(ns + "FileType", "Document")));
+                }
+            }
+        }
     }
 
     private static void EnsureMasmBuildCustomizations(XDocument document, XNamespace ns)
