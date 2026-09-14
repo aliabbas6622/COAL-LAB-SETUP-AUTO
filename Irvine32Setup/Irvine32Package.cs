@@ -40,32 +40,46 @@ public sealed class Irvine32Package : AsyncPackage
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
 
-        var commandService = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
-        if (commandService != null)
+        try
         {
-            var configureCmdId = new CommandID(CommandSet, ConfigureCommandId);
-            commandService.AddCommand(new OleMenuCommand(ConfigureIrvine32, configureCmdId));
-
-            var addAsmCmdId = new CommandID(CommandSet, AddAsmFileCommandId);
-            commandService.AddCommand(new OleMenuCommand(AddIrvineAsmFile, addAsmCmdId));
-        }
-
-        // Listen for solution fully loaded event
-        KnownUIContexts.SolutionExistsAndFullyLoadedContext.UIContextChanged += (s, e) =>
-        {
-            _ = JoinableTaskFactory.RunAsync(async () =>
+            var commandService = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
+            if (commandService != null)
             {
-                await JoinableTaskFactory.SwitchToMainThreadAsync();
-                if (KnownUIContexts.SolutionExistsAndFullyLoadedContext.IsActive)
-                {
-                    await CheckAndPromptOnSolutionOpenAsync();
-                }
-            });
-        };
+                var configureCmdId = new CommandID(CommandSet, ConfigureCommandId);
+                commandService.AddCommand(new OleMenuCommand(ConfigureIrvine32, configureCmdId));
 
-        if (KnownUIContexts.SolutionExistsAndFullyLoadedContext.IsActive)
+                var addAsmCmdId = new CommandID(CommandSet, AddAsmFileCommandId);
+                commandService.AddCommand(new OleMenuCommand(AddIrvineAsmFile, addAsmCmdId));
+            }
+
+            // Listen for solution fully loaded event
+            KnownUIContexts.SolutionExistsAndFullyLoadedContext.UIContextChanged += (s, e) =>
+            {
+                _ = JoinableTaskFactory.RunAsync(async () =>
+                {
+                    try
+                    {
+                        await JoinableTaskFactory.SwitchToMainThreadAsync();
+                        if (KnownUIContexts.SolutionExistsAndFullyLoadedContext.IsActive)
+                        {
+                            await CheckAndPromptOnSolutionOpenAsync();
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore non-fatal UI context/solution check errors during async events
+                    }
+                });
+            };
+
+            if (KnownUIContexts.SolutionExistsAndFullyLoadedContext.IsActive)
+            {
+                await CheckAndPromptOnSolutionOpenAsync();
+            }
+        }
+        catch (Exception ex)
         {
-            await CheckAndPromptOnSolutionOpenAsync();
+            System.Diagnostics.Debug.WriteLine($"Irvine32Package initialization error: {ex}");
         }
     }
 
@@ -87,27 +101,34 @@ public sealed class Irvine32Package : AsyncPackage
 
     private async Task CheckAndPromptOnSolutionOpenAsync()
     {
-        await JoinableTaskFactory.SwitchToMainThreadAsync();
-
-        var dte = await GetServiceAsync(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
-        if (dte == null) return;
-
-        var vcxprojPaths = GetVcxprojProjects(dte);
-        if (vcxprojPaths.Count == 0) return;
-
-        var unconfigured = vcxprojPaths.Where(p => !IsProjectConfigured(p)).ToList();
-        if (unconfigured.Count == 0) return;
-
-        var response = MessageBox.Show(
-            "One or more C++ projects in this solution require Irvine32 / MASM setup.\n\n" +
-            "Would you like to configure Irvine32 and MASM now?",
-            "Irvine32 Setup",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-
-        if (response == DialogResult.Yes)
+        try
         {
-            await ConfigureIrvine32Async(isManualInvocation: false);
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            var dte = await GetServiceAsync(typeof(EnvDTE.DTE)) as EnvDTE.DTE;
+            if (dte == null) return;
+
+            var vcxprojPaths = GetVcxprojProjects(dte);
+            if (vcxprojPaths.Count == 0) return;
+
+            var unconfigured = vcxprojPaths.Where(p => !IsProjectConfigured(p)).ToList();
+            if (unconfigured.Count == 0) return;
+
+            var response = MessageBox.Show(
+                "One or more C++ projects in this solution require Irvine32 / MASM setup.\n\n" +
+                "Would you like to configure Irvine32 and MASM now?",
+                "Irvine32 Setup",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (response == DialogResult.Yes)
+            {
+                await ConfigureIrvine32Async(isManualInvocation: false);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"CheckAndPromptOnSolutionOpenAsync error: {ex}");
         }
     }
 
